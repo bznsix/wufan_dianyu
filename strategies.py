@@ -1,124 +1,170 @@
-import backtrader as bt
-import backtrader.indicators as btind
 import pandas as pd
-import pdb
-class MyStrategy(bt.Strategy):
-    params = (
-        ('margin', 10), #杠杆倍数
-        ('gap_time', 10), #分成多少份
-        ('kline_interval',60*(60*1000)), #多少分钟
-        ('long_win_ratio',0.01) #止盈比例
-    )
+from datetime import timedelta, datetime
+import random,sys,json
+from broker import BROKER
+import os
+import time
+from pprint import pprint
+sys.path.append('lib')
+from wechat.wechat import WECHAT
 
-    def __init__(self):
-        self.broker.setcommission(commission=1/10000)
-        
+we = WECHAT()
+
+params = (
+    ('margin', 13), #杠杆倍数
+    ('gap_time', 9), #分成多少份
+    ('kline_interval',4*60*(60*1000)), #多少分钟
+    ('long_win_ratio',0.01), # 止盈比例
+    ('start_price',99999) # 启动价格
+)
+
+class PARAMS():
+    def __init__(self,params):
+        for item in params:
+            key = 'self.' + item[0]
+            value = item[1]
+            exec("%s = %f" % (key,value))
+
+class MyStrategy():
+
+    def __init__(self,symbol):
+        self.params = PARAMS(params)
+        self.broker = BROKER(symbol)
+        self.symbol = symbol
+        # print('现金',self.broker.get_cash())
+        we.send_to_wecom('系统启动')
+        self.load_config()
+
+    def load_config(self):
+        #在这里创建变量,会自动保存到文件
         self.start_cash = 0 #起始总资金
         self.now_gap = 0 #现在已经用了多少份
         self.long_order = {} #所有的多单{'gap_time':order}
         self.long_stop_order = {} #最新的止盈单
         self.dead_order = 0 #最新的止损订单
         self.last_can_buy = 0 #最新一次可以购买的时间
-        self.last_buy_price = [99999] #最后一次购买的价格列表
-        self.waitting_for_open = 0 #等待第一次挂单成交
-        self.waitting_to_buy_order = []
-        self.waitting_to_sell_order = []
-        
-    def next(self):
-        close = self.data.lines.close[0]
-        #获取当前持仓
-        position = self.broker.getposition(self.data).size
-        cash = self.broker.get_cash()
-        
-        # 获取当前的日期时间
-        current_datetime = self.data.datetime.datetime()
-        # 将日期时间转换为毫秒级别的时间戳
-        timestamp_ms = int(current_datetime.timestamp() * 1000)
-        
-        # print(f'{current_datetime},现金{cash},仓位{position}')
-        if  position < 0.0001 and self.waitting_for_open == 0: #这里可能没有仓位
-            self.one_piece_money = cash / self.params.gap_time
-            size = self.one_piece_money / close
-            order = self.buy(price=close,size=size)
-            self.waitting_for_open = 1
-            self.last_can_buy = timestamp_ms + self.params.kline_interval
-            print(f'开仓,价格{close},总现金{cash},当前时间{current_datetime}')
-            # 更新下总现金
-            self.waitting_to_buy_order.append(order)
-        
-        if  self.now_gap < self.params.gap_time and close < min(self.last_buy_price) * (1-self.params.long_win_ratio) and timestamp_ms > self.last_can_buy:
-            size = self.one_piece_money / close
-            self.buy(price=close,size=size)
-            self.last_can_buy = timestamp_ms + self.params.kline_interval
-            print(f'加仓，价格{close},头寸{size},当前时间{current_datetime}')
-        
-        # need_to_del = []
-        # for order in self.waitting_to_buy_order:
-        #     if order.status == order.Completed:
-        #         if close > order.executed.price*(1+self.params.long_win_ratio):
-        #             print(f'检测卖单{close},{order.executed.price}')
-        #             print(f'{order.ref}完成')
-        #             # 设置卖单
-        #             self.sell(size=abs(order.executed.size))
-        #             need_to_del.append(order)
+        self.last_buy_price = 0 #最后一次购买的价格
+        self.already_init = 1 #配置为0时需要等待价格低于设定价才会启动 / 配置为1时不需要
+        if os.path.exists("config.json"):
+            with open("config.json", "r") as f:
+                data = json.load(f)
+                for key, value in data.items():
+                    setattr(self, key, value)
 
-        # for order in need_to_del:
-        #     self.waitting_to_buy_order.remove(order)
-        
-                
-    def notify_order(self, order):
-        order_status = ['Created','Submitted','Accepted','Partial',
-                        'Completed','Canceled','Expired','Margin','Rejected']
-        # # 未被处理的订单
-        # if order.status in [order.Submitted, order.Accepted]:
-        #     print('ref:%.0f, name: %s, Order: %s'% (order.ref,
-        #                                            order.data._name,
-        #                                            order_status[order.status]))
-        #     print(order.price)
-        #     return
-        if order.status in [order.Partial, order.Completed]:
-            if order.isbuy():
-                self.now_gap += 1
-                self.waitting_for_open = 0
-                # 设置卖单
-                price = order.executed.price*(1+self.params.long_win_ratio)
-                self.last_buy_price.append(order.executed.price)
-                # print(
-                #         'BUY EXECUTED, status: %s, ref:%.0f, name: %s, Size: %.2f, Price: %.2f, Cost: %.2f, Comm %.2f' %
-                #         (order_status[order.status], # 订单状态
-                #          order.ref, # 订单编号
-                #          order.data._name, # 股票名称
-                #          order.executed.size, # 成交量
-                #          order.executed.price, # 成交价
-                #          order.executed.value, # 成交额
-                #          order.executed.comm)) # 佣金
-                # print(f'买单成交，价格{self.last_buy_price},当前次数{self.now_gap}，设置卖单价{price}')
-                self.sell(exectype=bt.Order.Limit,price = price,size=abs(order.executed.size))
-            elif order.issell():
-                self.now_gap -= 1
-                self.last_can_buy -= self.params.kline_interval
-                order_executed_time = self.data.num2date(order.executed.dt)
-                self.last_buy_price.remove(min(self.last_buy_price))
-                print(f'卖出,价格{order.executed.price},时间{order_executed_time}')
-                print(f'更新,上次购买价格{self.last_buy_price},')
-                # print('SELL EXECUTED, status: %s, ref:%.0f, name: %s, Size: %.2f, Price: %.2f, Cost: %.2f, Comm %.2f' %
-                #             (order_status[order.status],
-                #              order.ref,
-                #              order.data._name,
-                #              order.executed.size,
-                #              order.executed.price,
-                #              order.executed.value,
-                #              order.executed.comm))
-        # elif order.status in [order.Canceled, order.Margin, order.Rejected, order.Expired]:
-        #     # 订单未完成
-        #     print('ref:%.0f, name: %s, status: %s'% (
-        #         order.ref, order.data._name, order_status[order.status]))
-        #     print(order.price)
+    def save_to_json(self):
+        data = {}
+        #你不想保存到json的变量
+        ban_list = ['params','broker','cover']
+        for key, value in self.__dict__.items():
+            if not key.startswith("__"):
+                if key not in ban_list:
+                    data[key] = value
+        with open("config.json", "w") as f:
+            json.dump(data, f)
 
+    def clear_order(self):
+        # 清除变量,更新资金
+        self.broker.cancel()
+        # 清除所有订单
+        self.long_order = {}
+        self.long_stop_order = {}
+        self.dead_order = 0
+        self.last_buy_price = 0
+        self.start_cash = self.broker.get_cash() * self.params.margin #更新总资金
 
-    def stop(self):
-        print('---------stop----------')
-        print(bt.num2date(self.data.datetime[-1]).isoformat())
-        print('self.stats 当前可用资金', self.stats.broker.cash[0])
-        print('self.stats 当前总资产', self.stats.broker.value[0])
-        print('self.stats 最大回撤', self.stats.drawdown.drawdown[0])
+    def after_create_order(self,price):
+        self.last_buy_price = price
+        self.last_can_buy = time.time() * 1000 + self.params.kline_interval
+        print(f'更新下次可以购买时间,当前时间{time.time()},下次可以购买{self.last_can_buy}')
+
+    def next(self,trend):
+
+        close = self.broker.get_ticker()
+        long_pos = self.broker.get_position(side='long')
+        timestamp_ms = int(time.time() * 1000)
+
+        if (long_pos == 0 and close < self.params.start_price) or (long_pos == 0 and self.already_init == 1) :
+            self.already_init = 1
+            self.clear_order()
+            # 限价开一份多单,千分之一滑点
+            size = self.start_cash / self.params.gap_time / close
+            print(f'起始创建订单,size:{size},star_cash:{self.start_cash}')
+            we.send_to_wecom(f'起始创建订单,size:{size},star_cash:{self.start_cash}')
+            order = self.broker.future.creat_order(self.symbol,'market',size,1,'buy','LONG')
+            self.long_order[order['orderId']] = order
+            self.after_create_order(close*1.001)
+
+        if long_pos > 0:
+            for key in self.long_order.keys():
+                if self.long_stop_order.get(key) is None:
+                    # 当前level没有止盈单
+                    # 检测买单是否成交
+                    r = self.broker.check_order(self.long_order[key]['orderId'])[0]
+                    if r  == 'FILLED':
+                        # 成交了就更新买单信息
+                        self.long_order[key] = self.broker.future.get_order(symbol=self.symbol,order_id=key)
+                        price = float(self.long_order[key]['avgPrice']) * (1+self.params.long_win_ratio)
+                        amount = float(self.long_order[key]['executedQty'])
+                        print(f'创建止盈单,单号:{key},价格{price:.4f},数量{amount:.4f}')
+                        self.long_stop_order[key] = self.broker.sell(amount, 'long',price = price)
+                    # else:
+                    #     pprint(f'当前订单还没有成交,{self.long_order[key]}')
+
+            # 加仓逻辑
+            # print(self.now_gap,close < self.last_buy_price * (1-self.params.long_win_ratio),timestamp_ms > self.last_can_buy)
+            if self.now_gap < self.params.gap_time and close < self.last_buy_price * (1-self.params.long_win_ratio) and timestamp_ms > self.last_can_buy:
+                size = self.start_cash / self.params.gap_time / close
+                print(f'触发加仓,size:{size},当前时间:{timestamp_ms},上次购买{self.last_buy_price},当前是{self.now_gap}次')
+                we.send_to_wecom(f'触发加仓,size:{size:.3f},价格:{close},上次购买{self.last_buy_price},当前是{self.now_gap}次')
+                order = self.broker.future.creat_order(self.symbol,'market',size,1,'buy','LONG')
+                self.long_order[order['orderId']] = order
+                self.after_create_order(close*1.001)
+
+        keys_to_remove = []
+        # 检测止盈单逻辑
+        for key,order in self.long_stop_order.items():
+            try:
+                r = self.broker.check_order(order['orderId'])[0]
+                if r  == 'FILLED':
+                    keys_to_remove.append(key)
+                    # 为了庆祝,我们将时间回退,方便我们继续加仓
+                    self.last_can_buy = time.time() * 1000 - self.params.kline_interval
+                    # 计算下预估利润
+                    _buy_price = float(self.long_order[key]['avgPrice'])
+                    _exc_qty = float(self.long_order[key]['executedQty'])
+                    _sell_price = float(self.long_stop_order[key]['price'])
+                    _profit = (_sell_price - _buy_price) * _exc_qty
+                    we.send_to_wecom(f'第{len(self.long_stop_order.keys())}次加仓成功止盈,本次利润:{_profit:.2f}USDT')
+
+            except Exception as e:
+                # 加仓可能会清除止盈订单
+                # del self.long_stop_order[key]
+                print(f'计算利润出现问题,错误{e}')
+
+        for key in keys_to_remove:
+            print(f'这一次删除的订单{key}')
+            del self.long_stop_order[key]
+            del self.long_order[key]
+
+        if len(keys_to_remove) != 0:
+            # 有被删除的订单
+            #为了更快的复利,我们在这里更新下起始总资金
+            self.now_gap = len(self.long_order.keys())
+            self.start_cash = self.broker.get_cash() / (self.params.gap_time - self.now_gap) * self.params.gap_time * self.params.margin
+            print(f'触发更新起始总资金,起始总资金为->{self.start_cash}')
+            we.send_to_wecom(f'触发更新起始总资金,起始总资金为->{self.start_cash:.2f}')
+
+        buy_price = []
+        for key,order in self.long_order.items():
+            buy_price.append(float(order['avgPrice']))
+
+        if len(buy_price) != 0:
+            self.last_buy_price = min(buy_price)
+            # print(f'当前还有的订单列表：{buy_price},更新最后一次购买：{self.last_buy_price}')
+
+        # pprint(f'当前时间{timestamp_ms},当前仓位{long_pos}')
+        # pprint(self.long_order)
+        # pprint(self.long_stop_order)
+        # print(f'当前是{self.now_gap}次')
+        self.now_gap = len(self.long_order.keys())
+        self.save_to_json()

@@ -1,6 +1,6 @@
 import sys
 
-sys.path.append('/home/ubuntu/Crypto/wheel')
+sys.path.append('lib')
 from gateway.binance_gateway import FutureTrader
 from wickky_logic.wickky import WICKKY
 import pandas as pd

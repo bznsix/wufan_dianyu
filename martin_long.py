@@ -6,7 +6,7 @@ import os
 import time
 from pprint import pprint
 
-sys.path.append('/home/ubuntu/Crypto/wheel')
+sys.path.append('lib')
 from wechat.wechat import WECHAT
 
 we = WECHAT()
